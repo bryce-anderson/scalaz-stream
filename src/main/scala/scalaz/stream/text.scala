@@ -1,7 +1,10 @@
 package scalaz.stream
 
+import java.nio.CharBuffer
 import java.nio.charset.Charset
 import java.util.regex.Pattern
+import scala.annotation.{tailrec, switch}
+import scala.collection.mutable.ArrayBuffer
 import scalaz.std.string._
 import scodec.bits.ByteVector
 
@@ -88,9 +91,6 @@ object text {
    * }}}
    */
   def lines(maxLineLength: Int = 1024 * 1024): Process1[String, String] = {
-    val pattern = Pattern.compile("\r\n|\n")
-    def splitLines(s: String): IndexedSeq[String] = pattern.split(s, -1)
-
     val repartitionProcess =
       if (maxLineLength > 0)
         repartition { (s: String) =>
@@ -100,5 +100,24 @@ object text {
         }
       else repartition(splitLines)
     repartitionProcess.dropLastIf(_.isEmpty)
+  }
+
+  // Faster than a regex of "\r\n|\n"
+  private[stream] def splitLines(s: String): IndexedSeq[String] = {
+    val maxlen = s.length
+
+    @tailrec
+    def go(start: Int, i: Int, acc: Vector[String]) : Vector[String] = {
+      if (i < maxlen) {
+        if (s.charAt(i) == '\n') {
+          val p = if (i > start && s.charAt(i - 1) == '\r') i - 1 else i
+          go(i + 1, i + 1, acc :+ s.substring(start, p))
+        }
+        else go(start, i + 1, acc)
+      }
+      else acc :+ s.substring(start, maxlen)
+    }
+
+    go(0, 0, Vector.empty)
   }
 }

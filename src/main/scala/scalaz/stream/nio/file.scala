@@ -148,11 +148,11 @@ object file {
    */
   def textR(src: => AsynchronousFileChannel)(implicit codec: Codec): Process[Task,String] = suspend {
     val f = decodeByteBuff(codec)
-    Process.constant(1024)
+    Process.constant(32*1024)
       .toSource
       .through(chunkReadBuffer(src)).flatMap { buff =>
         val charbuff = f(buff)
-        val res= CharBuffer.wrap(charbuff).toString
+        val res = charbuff.toString
         emit(res)
       }
   }
@@ -193,26 +193,65 @@ object file {
    * which will be closed when this `Process` is halted.
    */
   def chunkWriteBuffer(src: => AsynchronousFileChannel): Sink[Task, ByteBuffer] = {
-    var pos = 0
-    resource(Task.delay(src))(
-      src => Task.delay(src.close)) { src =>
-      Task.now { (buff: ByteBuffer) =>
-        Task.async[Unit] { cb =>
-          def go(): Unit = {
-            src.write(buff, pos, null, new CompletionHandler[Integer, Null] {
-              override def completed(result: Integer, attachment: Null): Unit = {
-                if (result == -1) cb(-\/(Terminated(End))) // finished
-                else {
-                  pos += result
-                  if (buff.remaining() != 0) go()
-                  else cb(\/-(()))
-                }
-              }
-              override def failed(exc: Throwable, attachment: Null): Unit =
-                cb(-\/(Terminated(Error(exc))))
-            })
+    @volatile var pos = 0
+    val writeBuffer = ByteBuffer.allocate(32*1024)
+
+    // Writes the ByteBuffer to the AsynchronousFileChannel
+    def flushBuffer(buffer: ByteBuffer, src: AsynchronousFileChannel): Task[Unit] = Task.async { cb =>
+      def innerGo(): Unit = {
+        src.write(buffer, pos, null, new CompletionHandler[Integer, Null] {
+          override def completed(result: Integer, attachment: Null): Unit = {
+            if (result == -1) {
+              writeBuffer.clear()
+              cb(-\/(Terminated(End)))
+            } // finished
+            else {
+              pos += result
+              if (buffer.hasRemaining()) innerGo()
+              else cb(\/-(()))
+            }
           }
-          go()
+          override def failed(exc: Throwable, attachment: Null): Unit = {
+            writeBuffer.clear()
+            cb(-\/(Terminated(Error(exc))))
+          }
+        })
+      }
+
+      innerGo()
+    }
+
+    resource(Task.delay(src)) { src =>
+      val closeTask = Task.delay(src.close)
+      writeBuffer.flip()
+
+      if (writeBuffer.hasRemaining) flushBuffer(writeBuffer, src).flatMap(_ => closeTask)
+      else closeTask
+    }
+    { src =>
+      Task.now { (buff: ByteBuffer) =>
+        if (writeBuffer.remaining >= buff.remaining()) {
+          writeBuffer.put(buff)
+          Task.now(())
+        }
+        else if (writeBuffer.position() == 0) flushBuffer(buff, src)
+        else {
+        // buffer will overflow, so concat to the buffer and write.
+          val lim = buff.limit()
+          buff.limit(buff.position() + writeBuffer.remaining())
+          writeBuffer.put(buff)
+          buff.limit(lim)
+          writeBuffer.flip()
+
+          flushBuffer(writeBuffer, src).flatMap { _ =>
+            writeBuffer.clear()
+
+            if (buff.remaining() > writeBuffer.limit()) flushBuffer(buff, src)
+            else {
+              writeBuffer.put(buff)
+              Task.now(())
+            }
+          }
         }
       }
     }

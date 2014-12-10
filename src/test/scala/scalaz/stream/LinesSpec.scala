@@ -58,4 +58,18 @@ object LinesSpec extends Properties("text") {
         rmWhitespace(allLines.mkString) == stripped
     }
   }
+
+  property("splitString(s) should yield the same results as s.split(\"\\r\\n|\\n\", -1)") = {
+    import java.util.regex.Pattern
+    import Gen._
+
+    val p = Pattern.compile("\r\n|\n")
+
+    val stringWithNewlinesGen: Gen[String] =
+      listOf(frequency((5, alphaChar), (1, '\n'), (1, '\r'), (1, "\r\n"))).map(_.mkString)
+
+    forAll(stringWithNewlinesGen) { s =>
+      text.splitLines(s) == p.split(s, -1).toVector
+    }
+  }
 }
